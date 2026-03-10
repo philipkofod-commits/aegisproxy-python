@@ -1,3 +1,3 @@
-from .core import protect
+from .core import protect, __version__
 
-__all__ = ["protect"]
+__all__ = ["protect", "__version__"]

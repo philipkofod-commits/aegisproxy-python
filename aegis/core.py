@@ -1,7 +1,9 @@
 import os
 import httpx
 import logging
-from typing import Optional, List, Dict
+from typing import Optional, Dict
+
+__version__ = "0.1.0"
 
 # Set up logging
 logger = logging.getLogger("aegis")
@@ -22,24 +24,30 @@ PROVIDER_MAP = {
     "googleapis.com": "/v1/google",
     "groq.com": "/v1/groq",
     "mistral.ai": "/v1/mistral",
-    "together.ai": "/v1/together",
-    "cohere.ai": "/v1/cohere",
+    "together.xyz": "/v1/together",
+    "cohere.com": "/v1/cohere",
     "perplexity.ai": "/v1/perplexity",
 }
 
 class AegisNetworkHook:
-    def __init__(self, key: str, proxy_url: str, debug: bool = False):
+    def __init__(self, key: str, proxy_url: str, debug: bool = False, extra_providers: Optional[Dict[str, str]] = None):
         self.key = key
         self.proxy_url = proxy_url.rstrip("/")
         self.debug = debug
-        self.managed_domains = list(PROVIDER_MAP.keys())
+        # Merge default providers with any user-supplied extras
+        self.provider_map = {**PROVIDER_MAP, **(extra_providers or {})}
+        self.managed_domains = list(self.provider_map.keys())
+
+    def __repr__(self):
+        """Prevent API key from leaking in logs/tracebacks."""
+        return f"AegisNetworkHook(proxy_url={self.proxy_url!r}, debug={self.debug})"
 
     def _log(self, msg: str):
         if self.debug:
-            print(f"🛡️  [Aegis Debug] {msg}")
+            logger.info(f"[Aegis] {msg}")
 
     def _get_provider_path(self, host: str) -> Optional[str]:
-        for domain, path in PROVIDER_MAP.items():
+        for domain, path in self.provider_map.items():
             if host.endswith(domain):
                 return path
         return None
@@ -50,11 +58,16 @@ class AegisNetworkHook:
         if provider_path:
             self._log(f"Intercepting request to {request.url.host}")
             original_path = request.url.path
+            # Preserve query string parameters
+            query = request.url.query
             new_url_str = f"{self.proxy_url}{provider_path}{original_path}"
+            if query:
+                new_url_str += f"?{query.decode() if isinstance(query, bytes) else query}"
             
             # Inject headers while preserving originals
             headers = dict(request.headers)
             headers["x-aegis-key"] = self.key
+            headers["x-aegis-sdk"] = f"python/{__version__}"
             
             return httpx.Request(
                 method=request.method,
@@ -78,7 +91,7 @@ class AegisNetworkHook:
 
 _hook_installed = False
 
-def protect(aegis_key: Optional[str] = None, proxy_url: str = DEFAULT_AEGIS_URL, debug: bool = False):
+def protect(aegis_key: Optional[str] = None, proxy_url: str = DEFAULT_AEGIS_URL, debug: bool = False, extra_providers: Optional[Dict[str, str]] = None):
     """
     Initializes the Aegis SDK, globally monkey-patching HTTP libraries.
     
@@ -86,6 +99,7 @@ def protect(aegis_key: Optional[str] = None, proxy_url: str = DEFAULT_AEGIS_URL,
         aegis_key: Your AegisProxy API key. Falls back to AEGIS_API_KEY env var.
         proxy_url: Custom Aegis endpoint.
         debug: Enable verbose logging for debugging.
+        extra_providers: Additional provider domain mappings, e.g. {"api.deepseek.com": "/v1/deepseek"}.
     """
     global _hook_installed
     if _hook_installed:
@@ -95,7 +109,7 @@ def protect(aegis_key: Optional[str] = None, proxy_url: str = DEFAULT_AEGIS_URL,
     if not key:
         raise ValueError("Aegis API key is required. Pass aegis_key to protect() or set AEGIS_API_KEY environment variable.")
         
-    hook = AegisNetworkHook(key=key, proxy_url=proxy_url, debug=debug)
+    hook = AegisNetworkHook(key=key, proxy_url=proxy_url, debug=debug, extra_providers=extra_providers)
     
     # Monkey-patch httpx
     httpx.Client.send = lambda self, req, *args, **kwargs: hook.patched_send(self, req, *args, **kwargs)
@@ -129,5 +143,5 @@ def protect(aegis_key: Optional[str] = None, proxy_url: str = DEFAULT_AEGIS_URL,
         pass
 
     _hook_installed = True
-    print(f"🛡️  AegisProxy activated: Global network hooks installed.")
+    logger.info("🛡️  AegisProxy activated: Global network hooks installed.")
 
